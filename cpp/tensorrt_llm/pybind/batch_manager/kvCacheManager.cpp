@@ -299,6 +299,312 @@ public:
         PYBIND11_OVERLOAD_PURE(bool, tb::BasePeftCacheManager, enabled);
     }
 };
+
+class PyKVCacheAdapter : public tbk::BaseKVCacheManager {
+public:
+    explicit PyKVCacheAdapter(py::object py_impl) : _py_impl(std::move(py_impl)) {}
+
+    ~PyKVCacheAdapter() override = default;
+
+    // Forwarding helpers
+    bool has_attr(const char* name) const { return py::hasattr(_py_impl, name); }
+
+    // Implement virtuals by forwarding to Python impl (acquire GIL)
+    void allocatePools(bool useUvm = false) override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("allocate_pools")) _py_impl.attr("allocate_pools")(useUvm);
+        else throw std::runtime_error("Python impl missing allocate_pools");
+    }
+
+    void releasePools() override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("release_pools")) _py_impl.attr("release_pools")();
+        else throw std::runtime_error("Python impl missing release_pools");
+    }
+
+    void startScheduling() override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("start_scheduling")) _py_impl.attr("start_scheduling")();
+    }
+
+    void registerKVManager(std::shared_ptr<tbk::BaseKVCacheManager> kv_manager) {
+        py::gil_scoped_acquire gil;
+        if (has_attr("register_kv_manager")) _py_impl.attr("register_kv_manager")(kv_manager);
+    }
+
+    // 新增：将 Python 侧的 register_kv_tensors 转发到适配器实现
+    void registerKvTensors(py::object kv_tensors) {
+        py::gil_scoped_acquire gil;
+        if (has_attr("register_kv_tensors")) _py_impl.attr("register_kv_tensors")(kv_tensors);
+    }
+
+    SizeType32 getTokensPerBlock() const override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("tokens_per_block")) return py::cast<SizeType32>(_py_impl.attr("tokens_per_block"));
+        throw std::runtime_error("Python impl missing tokens_per_block");
+    }
+
+    SizeType32 getMaxNumBlocks() const override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("max_num_blocks")) return py::cast<SizeType32>(_py_impl.attr("max_num_blocks"));
+        throw std::runtime_error("Python impl missing max_num_blocks");
+    }
+
+    SizeType32 getNumPools() const override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("num_pools")) return py::cast<SizeType32>(_py_impl.attr("num_pools"));
+        throw std::runtime_error("Python impl missing num_pools");
+    }
+
+    tbk::KvCacheStats getKvCacheStats() const override {
+        py::gil_scoped_acquire gil;
+        if (!has_attr("get_kv_cache_stats")) throw std::runtime_error("Python impl missing get_kv_cache_stats");
+        auto py_stats = _py_impl.attr("get_kv_cache_stats")();
+        return py::cast<tbk::KvCacheStats>(py_stats);
+    }
+
+    void addToken(RequestIdType requestId) override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("add_token")) _py_impl.attr("add_token")(requestId);
+    }
+
+    void addSequence(RequestIdType requestId, SizeType32 inputLength, SizeType32 beamWidth,
+                     tensorrt_llm::common::OptionalRef<tensorrt_llm::batch_manager::LlmRequest> llmRequest = std::nullopt) override
+    {
+        py::gil_scoped_acquire gil;
+        if (has_attr("add_sequence")) {
+            _py_impl.attr("add_sequence")(requestId, inputLength, beamWidth);
+        }
+    }
+
+    std::optional<tbk::KVCacheBlock::IdType> removeSequence(RequestIdType requestId,
+        tensorrt_llm::common::OptionalRef<const tensorrt_llm::batch_manager::LlmRequest> llmRequest = std::nullopt,
+        bool pinOnRelease = false) override
+    {
+        py::gil_scoped_acquire gil;
+        if (!has_attr("remove_sequence")) return std::nullopt;
+        auto res = _py_impl.attr("remove_sequence")(requestId, pinOnRelease);
+        if (res.is_none()) return std::nullopt;
+        return py::cast<std::optional<tbk::KVCacheBlock::IdType>>(res);
+    }
+
+    std::optional<tbk::KVCacheBlock::IdType> storeBlocksForReuse(RequestIdType requestId,
+        tensorrt_llm::common::OptionalRef<const tensorrt_llm::batch_manager::LlmRequest> llmRequest,
+        bool pinBlocks) override
+    {
+        py::gil_scoped_acquire gil;
+        if (!has_attr("store_blocks_for_reuse")) return std::nullopt;
+        auto res = _py_impl.attr("store_blocks_for_reuse")(requestId, pinBlocks);
+        if (res.is_none()) return std::nullopt;
+        return py::cast<std::optional<tbk::KVCacheBlock::IdType>>(res);
+    }
+
+    tbk::GenerationRequest const& getSequence(RequestIdType requestId) const override {
+        py::gil_scoped_acquire gil;
+        throw std::runtime_error("getSequence forwarding not implemented in adapter");
+    }
+
+    void schedulingRemoveSequence(RequestIdType requestId) override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("scheduling_remove_sequence")) _py_impl.attr("scheduling_remove_sequence")(requestId);
+    }
+
+    tr::ITensor::SharedPtr getBlockPoolPointers() const override {
+        py::gil_scoped_acquire gil;
+        if (!has_attr("get_block_pool_pointers")){
+            py::print("Python impl missing get_block_pool_pointers");
+            return nullptr;
+        }
+        py::object r = _py_impl.attr("get_block_pool_pointers")();
+        if (r.is_none()) {
+            py::print("get_block_pool_pointers returned None");
+            return nullptr;
+        }
+        at::Tensor t = r.cast<at::Tensor>();
+        auto up = tr::TorchView::of(t);
+        return tr::ITensor::SharedPtr(std::move(up));
+    }
+
+    tr::ITensor::SharedPtr getLayerToPoolMapping() const override {
+        py::gil_scoped_acquire gil;
+        if (!has_attr("get_layer_to_pool_mapping")) {
+            py::print("Python impl missing get_layer_to_pool_mapping");
+            return nullptr;
+        }
+        py::object r = _py_impl.attr("get_layer_to_pool_mapping")();
+        if (r.is_none()) {
+            py::print("get_layer_to_pool_mapping returned None");
+            return nullptr;
+        }
+        at::Tensor t = r.cast<at::Tensor>();
+        auto up = tr::TorchView::of(t);
+        return tr::ITensor::SharedPtr(std::move(up));
+    }
+
+    void getBlockOffsetsOfBatch(tr::ITensor& output, SizeType32 firstBatchSlotIdx, SizeType32 batchSize,
+                                SizeType32 beamWidth) const override
+    {
+        py::gil_scoped_acquire gil;
+        if (!has_attr("get_block_offsets_of_batch")) return;
+        // 创建共享指针包装器
+        auto outputShared = std::shared_ptr<tr::ITensor>(&output, [](tr::ITensor*){});
+        auto out_t = tr::Torch::tensor(outputShared);
+        _py_impl.attr("get_block_offsets_of_batch")(out_t, firstBatchSlotIdx, batchSize, beamWidth);
+    }
+
+    SizeType32 copyBlockOffsets(tr::ITensor& output, SizeType32 outputSlotOffset, RequestIdType requestId) const override {
+        py::gil_scoped_acquire gil;
+        if (!has_attr("copy_block_offsets")) return 0;
+        auto outputShared = std::shared_ptr<tr::ITensor>(&output, [](tr::ITensor*){});
+        auto out_t = tr::Torch::tensor(outputShared);
+        auto r = _py_impl.attr("copy_block_offsets")(out_t, outputSlotOffset, requestId);
+        return py::cast<SizeType32>(r);
+    }
+
+    bool isEnableBlockReuse() const override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("enable_block_reuse")) return py::cast<bool>(_py_impl.attr("enable_block_reuse"));
+        return false;
+    }
+
+    void rewindKVCache(RequestIdType requestId, SizeType32 rewindLengths) override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("rewind_kv_cache")) _py_impl.attr("rewind_kv_cache")(requestId, rewindLengths);
+    }
+
+    bool isCrossKv() const override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("cross_kv")) return py::cast<bool>(_py_impl.attr("cross_kv"));
+        return false;
+    }
+
+    // Many other methods exist on BaseKVCacheManager; implement as needed by forwarding pattern.
+    // For brevity, unimplemented methods will throw if called.
+    std::optional<tbk::BlockKey> findNewContextBlock(const tensorrt_llm::runtime::VecUniqueTokens& uniqueTokens,
+                                                     const tensorrt_llm::batch_manager::LlmRequest& llmRequest) const override
+    {
+        throw std::runtime_error("findNewContextBlock not implemented in adapter");
+    }
+
+    void storeContextBlocks(const tensorrt_llm::batch_manager::LlmRequest& llmRequest) override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("store_context_blocks")) _py_impl.attr("store_context_blocks")(py::none());
+    }
+
+    std::vector<std::vector<SizeType32>> const& getCacheBlockIds(RequestIdType requestId, SizeType32 windowSize) const override {
+        throw std::runtime_error("getCacheBlockIds not implemented in adapter");
+    }
+
+    std::vector<std::vector<std::vector<SizeType32>>> getBatchCacheBlockIds(
+        std::vector<RequestIdType> const& requestIds, SizeType32 windowSize) const override
+    {
+        throw std::runtime_error("getBatchCacheBlockIds not implemented in adapter");
+    }
+
+    SizeType32 getUsedNumBlocks() const override {
+        throw std::runtime_error("getUsedNumBlocks not implemented in adapter");
+    }
+
+    SizeType32 getNumFreeBlocks() const override {
+        throw std::runtime_error("getNumFreeBlocks not implemented in adapter");
+    }
+
+    tbk::BlockManager const& getBlockManager() const override {
+        throw std::runtime_error("getBlockManager not implemented in adapter");
+    }
+
+    std::deque<tensorrt_llm::executor::KVCacheEvent> getLatestEvents(
+        std::optional<std::chrono::milliseconds> timeout = std::nullopt) const override
+    {
+        throw std::runtime_error("getLatestEvents not implemented in adapter");
+    }
+
+    tr::ITensor::SharedPtr getPrimaryPool(SizeType32 poolIdx) const override {
+        throw std::runtime_error("getPrimaryPool not implemented in adapter");
+    }
+
+    tr::ITensor::SharedPtr getIndexerKCachePool() const override { return nullptr; }
+    tr::ITensor::SharedPtr getUniquePrimaryPool() const override { return nullptr; }
+
+    SizeType32 getPoolLayerIdx(SizeType32 layer_idx) const override {
+        throw std::runtime_error("getPoolLayerIdx not implemented in adapter");
+    }
+
+    SizeType32 getNumReusedBlocks() const noexcept override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("get_num_reused_blocks")) 
+            return py::cast<SizeType32>(_py_impl.attr("get_num_reused_blocks")());
+        return 0;
+    }
+
+    tbk::OffsetTableDimensions getOffsetTableDimensions() const override {
+        // 返回默认值或从Python实现获取
+        return tbk::OffsetTableDimensions{};
+    }
+
+    SizeType32 getNeededBlocksOneStep(const tensorrt_llm::batch_manager::LlmRequest&, bool, SizeType32) const override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("get_needed_blocks_one_step"))
+            return py::cast<SizeType32>(_py_impl.attr("get_needed_blocks_one_step")());
+        return 0;
+    }
+
+    SizeType32 getRemainingBlocksToCompletion(const tensorrt_llm::batch_manager::LlmRequest&, SizeType32) const override {
+        return 0;
+    }
+
+    void pinBlocks(RequestIdType requestId) override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("pin_blocks")) _py_impl.attr("pin_blocks")(requestId);
+    }
+
+    tr::ITensor::SharedPtr getBlockScalePoolPointers() const override {
+        return nullptr;
+    }
+
+    tbk::GenerationRequest& getSequence(RequestIdType requestId) override {
+        throw std::runtime_error("getSequence non-const not implemented in adapter");
+    }
+
+    void storeNewBlock(const tensorrt_llm::batch_manager::LlmRequest&) override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("store_new_block")) _py_impl.attr("store_new_block")();
+    }
+
+    std::optional<tbk::KVCacheBlock::IdType> getLastBlockId(RequestIdType requestId) const override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("get_last_block_id")) {
+            auto res = _py_impl.attr("get_last_block_id")(requestId);
+            if (res.is_none()) return std::nullopt;
+            return py::cast<tbk::KVCacheBlock::IdType>(res);
+        }
+        return std::nullopt;
+    }
+
+    SizeType32 getMaxCapacityBatchSize(SizeType32, SizeType32) const override {
+        return 0;
+    }
+
+    tbk::CacheType getCacheType() const override {
+        return tbk::CacheType::kSELF;
+    }
+
+    std::shared_ptr<tbk::KVCacheBlock> findBlocksInReuseTreeByBlockKey(const tbk::BlockKey&, SizeType32) override {
+        return nullptr;
+    }
+
+    void unpinBlocksById(tbk::KVCacheBlock::IdType blockId) override {
+        py::gil_scoped_acquire gil;
+        if (has_attr("unpin_blocks_by_id")) _py_impl.attr("unpin_blocks_by_id")(blockId);
+    }
+
+    void refreshBlocks() override { }
+    void flushIterationEvents() override { }
+
+private:
+    py::object _py_impl;
+};
+
 } // namespace
 
 void tb::kv_cache_manager::KVCacheManagerBindings::initBindings(py::module_& m)
@@ -347,146 +653,297 @@ void tb::kv_cache_manager::KVCacheManagerBindings::initBindings(py::module_& m)
             py::arg("window_size_to_layers"), py::arg("allotted_primary_mem_bytes"),
             py::arg("allotted_secondary_mem_bytes"), py::arg("extra_cost_memory"), py::arg("kv_factor"),
             py::call_guard<py::gil_scoped_release>())
-        .def("allocate_pools", &BaseKVCacheManager::allocatePools, py::call_guard<py::gil_scoped_release>())
-        .def("release_pools", &BaseKVCacheManager::releasePools, py::call_guard<py::gil_scoped_release>())
-        .def("start_scheduling", &BaseKVCacheManager::startScheduling, py::call_guard<py::gil_scoped_release>())
-        .def_property_readonly("tokens_per_block", &BaseKVCacheManager::getTokensPerBlock)
-        .def_property_readonly("max_num_blocks", &BaseKVCacheManager::getMaxNumBlocks)
-        .def_property_readonly("num_pools", &BaseKVCacheManager::getNumPools)
-        .def("get_kv_cache_stats", &BaseKVCacheManager::getKvCacheStats, py::call_guard<py::gil_scoped_release>())
+        .def(
+            "allocate_pools",
+            [](tbk::BaseKVCacheManager& self, bool useUvm) {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                    adapter->allocatePools(useUvm);
+                    return;
+                }
+                self.allocatePools(useUvm);
+            },
+            py::arg("useUvm") = false, py::call_guard<py::gil_scoped_release>())
+        .def(
+            "release_pools",
+            [](tbk::BaseKVCacheManager& self) {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                    adapter->releasePools();
+                    return;
+                }
+                self.releasePools();
+            },
+            py::call_guard<py::gil_scoped_release>())
+        .def(
+            "start_scheduling",
+            [](tbk::BaseKVCacheManager& self) {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                    adapter->startScheduling();
+                    return;
+                }
+                self.startScheduling();
+            },
+            py::call_guard<py::gil_scoped_release>())
+        .def_property_readonly(
+            "tokens_per_block",
+            [](tbk::BaseKVCacheManager& self) -> SizeType32 {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) return adapter->getTokensPerBlock();
+                return self.getTokensPerBlock();
+            })
+        .def_property_readonly(
+            "max_num_blocks",
+            [](tbk::BaseKVCacheManager& self) -> SizeType32 {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) return adapter->getMaxNumBlocks();
+                return self.getMaxNumBlocks();
+            })
+        .def_property_readonly(
+            "num_pools",
+            [](tbk::BaseKVCacheManager& self) -> SizeType32 {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) return adapter->getNumPools();
+                return self.getNumPools();
+            })
+        .def(
+            "get_kv_cache_stats",
+            [](tbk::BaseKVCacheManager& self) {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) return adapter->getKvCacheStats();
+                return self.getKvCacheStats();
+            },
+            py::call_guard<py::gil_scoped_release>())
         .def_property_readonly("max_blocks_per_seq",
             [](tbk::BaseKVCacheManager& self) { return self.getOffsetTableDimensions().maxBlocksPerSeq; })
-        .def("get_needed_blocks_one_step", &BaseKVCacheManager::getNeededBlocksOneStep,
-            py::call_guard<py::gil_scoped_release>())
-        .def("get_remaining_blocks_to_completion", &BaseKVCacheManager::getRemainingBlocksToCompletion,
-            py::call_guard<py::gil_scoped_release>())
-        .def("add_token", &BaseKVCacheManager::addToken, py::call_guard<py::gil_scoped_release>())
-        .def("add_sequence", &BaseKVCacheManager::addSequence, py::call_guard<py::gil_scoped_release>())
-        .def("remove_sequence", &BaseKVCacheManager::removeSequence, py::call_guard<py::gil_scoped_release>())
-        .def("pin_blocks", &BaseKVCacheManager::pinBlocks, py::call_guard<py::gil_scoped_release>())
-        .def("scheduling_remove_sequence", &BaseKVCacheManager::schedulingRemoveSequence,
+        .def(
+            "get_needed_blocks_one_step",
+            [](tbk::BaseKVCacheManager& self, const tensorrt_llm::batch_manager::LlmRequest& req, bool a, SizeType32 b) {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) return adapter->getNeededBlocksOneStep(req, a, b);
+                return self.getNeededBlocksOneStep(req, a, b);
+            },
             py::call_guard<py::gil_scoped_release>())
         .def(
-            "get_block_pool_pointers",
-            [](tbk::BaseKVCacheManager& self)
-            {
-                std::optional<at::Tensor> block_pool_pointers{std::nullopt};
-                auto tensor = self.getBlockPoolPointers();
-                if (tensor)
-                {
-                    std::shared_ptr<tensorrt_llm::runtime::ITensor> _tensor = std::move(tensor);
-                    block_pool_pointers = tr::Torch::tensor(_tensor);
+            "get_remaining_blocks_to_completion",
+            [](tbk::BaseKVCacheManager& self, const tensorrt_llm::batch_manager::LlmRequest& req, SizeType32 window_size) -> SizeType32 {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) return adapter->getRemainingBlocksToCompletion(req, window_size);
+                return self.getRemainingBlocksToCompletion(req, window_size);
+            },
+            py::arg("request"), py::arg("window_size"), py::call_guard<py::gil_scoped_release>())
+        .def(
+            "add_token",
+            [](tbk::BaseKVCacheManager& self, tb::LlmRequest::RequestIdType requestId) {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) { adapter->addToken(requestId); return; }
+                self.addToken(requestId);
+            },
+            py::call_guard<py::gil_scoped_release>())
+        .def(
+            "add_sequence",
+            [](tbk::BaseKVCacheManager& self, tb::LlmRequest::RequestIdType requestId, SizeType32 inputLength, SizeType32 beamWidth) {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) { adapter->addSequence(requestId, inputLength, beamWidth); return; }
+                self.addSequence(requestId, inputLength, beamWidth);
+            },
+            py::call_guard<py::gil_scoped_release>())
+        .def(
+            "remove_sequence",
+            [](tbk::BaseKVCacheManager& self, tb::LlmRequest::RequestIdType requestId) -> std::optional<tbk::KVCacheBlock::IdType> {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                    return adapter->removeSequence(requestId);
                 }
-                return block_pool_pointers;
+                return self.removeSequence(requestId);
             },
             py::call_guard<py::gil_scoped_release>())
         .def(
-            "get_block_scale_pool_pointers",
-            [](tbk::BaseKVCacheManager& self)
+            "pin_blocks",
+            [](tbk::BaseKVCacheManager& self, tb::LlmRequest::RequestIdType requestId) {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) { adapter->pinBlocks(requestId); return; }
+                self.pinBlocks(requestId);
+            },
+            py::call_guard<py::gil_scoped_release>())
+        .def(
+            "scheduling_remove_sequence",
+            [](tbk::BaseKVCacheManager& self, tb::LlmRequest::RequestIdType requestId) {
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) { adapter->schedulingRemoveSequence(requestId); return; }
+                self.schedulingRemoveSequence(requestId);
+            },
+            py::call_guard<py::gil_scoped_release>())
+         .def(
+             "get_block_pool_pointers",
+             [](tbk::BaseKVCacheManager& self)
+             {
+                 std::optional<at::Tensor> block_pool_pointers{std::nullopt};
+                 // 优先由 adapter 提供实现；基类虚函数会正确分发，但保留显式 adapter 分支以便一致性
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                     auto tensor = adapter->getBlockPoolPointers();
+                     if (tensor) block_pool_pointers = tr::Torch::tensor(tensor);
+                     else block_pool_pointers = tr::Torch::tensor(nullptr);
+                 } else {
+                     auto tensor = self.getBlockPoolPointers();
+                     if (tensor)
+                     {
+                         std::shared_ptr<tensorrt_llm::runtime::ITensor> _tensor = std::move(tensor);
+                         block_pool_pointers = tr::Torch::tensor(_tensor);
+                     }
+                     else block_pool_pointers = tr::Torch::tensor(nullptr);
+                 }
+                 return block_pool_pointers;
+             },
+             py::call_guard<py::gil_scoped_release>())
+         .def(
+             "get_block_scale_pool_pointers",
+             [](tbk::BaseKVCacheManager& self)
+             {
+                 std::optional<at::Tensor> block_scale_pool_pointers{std::nullopt};
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                     auto tensor = adapter->getBlockScalePoolPointers();
+                     if (tensor) block_scale_pool_pointers = tr::Torch::tensor(tensor);
+                     else block_scale_pool_pointers = tr::Torch::tensor(nullptr);
+                 } else {
+                     auto tensor = self.getBlockScalePoolPointers();
+                     if (tensor)
+                     {
+                         std::shared_ptr<tensorrt_llm::runtime::ITensor> _tensor = std::move(tensor);
+                         block_scale_pool_pointers = tr::Torch::tensor(_tensor);
+                     }
+                     else block_scale_pool_pointers = tr::Torch::tensor(nullptr);
+                 }
+                 return block_scale_pool_pointers;
+             },
+             py::call_guard<py::gil_scoped_release>())
+         .def(
+             "get_layer_to_pool_mapping",
+             [](tbk::BaseKVCacheManager& self)
+             {
+                 std::optional<at::Tensor> layer_to_pool_mapping{std::nullopt};
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                     auto tensor = adapter->getLayerToPoolMapping();
+                     if (tensor) layer_to_pool_mapping = tr::Torch::tensor(tensor);
+                 } else {
+                     auto tensor = self.getLayerToPoolMapping();
+                     if (tensor)
+                     {
+                         std::shared_ptr<tensorrt_llm::runtime::ITensor> _tensor = std::move(tensor);
+                         layer_to_pool_mapping = tr::Torch::tensor(_tensor);
+                     }
+                 }
+                 return layer_to_pool_mapping;
+             },
+             py::call_guard<py::gil_scoped_release>())
+         .def(
+             "get_primary_pool_data",
+             [](tbk::BaseKVCacheManager& self, SizeType32 layer_idx) -> at::Tensor
+             {
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                     auto pool = tr::Torch::tensor(adapter->getPrimaryPool(layer_idx));
+                     auto pool_layer_idx = adapter->getPoolLayerIdx(layer_idx);
+                     return pool.index({torch::indexing::Slice(), pool_layer_idx});
+                 }
+                 auto pool = tr::Torch::tensor(self.getPrimaryPool(layer_idx));
+                 auto pool_layer_idx = self.getPoolLayerIdx(layer_idx);
+                 return pool.index({torch::indexing::Slice(), pool_layer_idx});
+             },
+             py::call_guard<py::gil_scoped_release>())
+         .def(
+             "get_indexer_k_cache_pool_data",
+             [](tbk::BaseKVCacheManager& self, SizeType32 layer_idx) -> at::Tensor
+             {
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                     auto pool = tr::Torch::tensor(adapter->getIndexerKCachePool());
+                     return pool.index({torch::indexing::Slice(), layer_idx});
+                 }
+                 auto pool = tr::Torch::tensor(self.getIndexerKCachePool());
+                 return pool.index({torch::indexing::Slice(), layer_idx});
+             },
+             py::call_guard<py::gil_scoped_release>())
+         .def(
+             "get_unique_primary_pool",
+             [](tbk::BaseKVCacheManager& self) {
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) return adapter->getUniquePrimaryPool();
+                 return self.getUniquePrimaryPool();
+             },
+             py::call_guard<py::gil_scoped_release>())
+         .def(
+             "get_block_offsets_of_batch",
+             [](tbk::BaseKVCacheManager& self, at::Tensor output, SizeType32 firstBatchSlotIdx, SizeType32 batchSize,
+                 SizeType32 beamWidth)
+             {
+                 auto _output = from_torch(output);
+                 TLLM_CHECK_WITH_INFO(_output.has_value(), "Invalid output tensor.");
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                     adapter->getBlockOffsetsOfBatch(*(_output.value()), firstBatchSlotIdx, batchSize, beamWidth);
+                     return;
+                 }
+                 self.getBlockOffsetsOfBatch(*(_output.value()), firstBatchSlotIdx, batchSize, beamWidth);
+             },
+             py::call_guard<py::gil_scoped_release>())
+         .def(
+             "copy_block_offsets",
+             [](tbk::BaseKVCacheManager& self, at::Tensor output, SizeType32 outputSlotOffset,
+                 tb::LlmRequest::RequestIdType requestId)
+             {
+                 auto _output = from_torch(output);
+                 TLLM_CHECK_WITH_INFO(_output.has_value(), "Invalid output tensor.");
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                     return adapter->copyBlockOffsets(*(_output.value()), outputSlotOffset, requestId);
+                 }
+                 auto maxBlockCount = self.copyBlockOffsets(*(_output.value()), outputSlotOffset, requestId);
+                 return maxBlockCount;
+             },
+             py::call_guard<py::gil_scoped_release>())
+         .def(
+             "copy_batch_block_offsets",
+             [](tbk::BaseKVCacheManager& self, at::Tensor output,
+                 std::vector<tb::LlmRequest::RequestIdType> const& requestIds, SizeType32 const beamWidth,
+                 SizeType32 const offset)
+             {
+                 auto _output = from_torch(output);
+                 TLLM_CHECK_WITH_INFO(_output.has_value(), "Invalid output tensor.");
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                     for (size_t i = 0; i < requestIds.size(); ++i) adapter->copyBlockOffsets(*(_output.value()), i * beamWidth + offset, requestIds[i]);
+                     return;
+                 }
+                 for (size_t i = 0; i < requestIds.size(); ++i) self.copyBlockOffsets(*(_output.value()), i * beamWidth + offset, requestIds[i]);
+             },
+             py::call_guard<py::gil_scoped_release>())
+         .def(
+             "get_latest_events",
+             [](tbk::BaseKVCacheManager& self, std::optional<double> timeout_ms = std::nullopt)
+             {
+                 if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self)) {
+                     if (timeout_ms) return adapter->getLatestEvents(std::chrono::milliseconds(static_cast<int64_t>(*timeout_ms)));
+                     return adapter->getLatestEvents(std::nullopt);
+                 }
+                 if (timeout_ms) {
+                     return self.getLatestEvents(std::chrono::milliseconds(static_cast<int64_t>(*timeout_ms)));
+                 }
+                 return self.getLatestEvents(std::nullopt);
+             },
+             py::arg("timeout_ms") = std::nullopt, py::call_guard<py::gil_scoped_release>())
+         .def_property_readonly("enable_block_reuse", &BaseKVCacheManager::isEnableBlockReuse)
+         .def("rewind_kv_cache", &BaseKVCacheManager::rewindKVCache, py::call_guard<py::gil_scoped_release>())
+         .def_property_readonly("cross_kv", &BaseKVCacheManager::isCrossKv)
+         .def("store_context_blocks", &BaseKVCacheManager::storeContextBlocks, py::call_guard<py::gil_scoped_release>())
+         .def("store_blocks_for_reuse", &BaseKVCacheManager::storeBlocksForReuse,
+             py::call_guard<py::gil_scoped_release>())
+         .def("get_cache_block_ids", &BaseKVCacheManager::getCacheBlockIds, py::call_guard<py::gil_scoped_release>())
+         .def("get_batch_cache_block_ids", &BaseKVCacheManager::getBatchCacheBlockIds,
+             py::call_guard<py::gil_scoped_release>())
+         .def("flush_iteration_events", &BaseKVCacheManager::flushIterationEvents,
+             py::call_guard<py::gil_scoped_release>())
+         .def("get_last_block_id", &BaseKVCacheManager::getLastBlockId, py::call_guard<py::gil_scoped_release>())
+         .def("unpin_blocks_by_id", &BaseKVCacheManager::unpinBlocksById, py::call_guard<py::gil_scoped_release>())
+         .def_static("make_kvcached_adapter", 
+         [](py::object py_impl) -> std::shared_ptr<tbk::BaseKVCacheManager> {
+             return std::shared_ptr<tbk::BaseKVCacheManager>(new PyKVCacheAdapter(py_impl));
+         })
+        // 为 Python 端统一暴露 register_kv_tensors，优先调用 PyKVCacheAdapter::registerKvTensors
+        .def(
+            "register_kv_tensors",
+            [](tbk::BaseKVCacheManager& self, py::object kv_tensors)
             {
-                std::optional<at::Tensor> block_scale_pool_pointers{std::nullopt};
-                auto tensor = self.getBlockScalePoolPointers();
-                if (tensor)
+                // 如果底层是我们创建的 Python 适配器，转发到其 registerKvTensors
+                if (auto *adapter = dynamic_cast<PyKVCacheAdapter*>(&self))
                 {
-                    std::shared_ptr<tensorrt_llm::runtime::ITensor> _tensor = std::move(tensor);
-                    block_scale_pool_pointers = tr::Torch::tensor(_tensor);
-                }
-                return block_scale_pool_pointers;
-            },
-            py::call_guard<py::gil_scoped_release>())
-        .def(
-            "get_layer_to_pool_mapping",
-            [](tbk::BaseKVCacheManager& self)
-            {
-                std::optional<at::Tensor> layer_to_pool_mapping{std::nullopt};
-                auto tensor = self.getLayerToPoolMapping();
-                if (tensor)
-                {
-                    std::shared_ptr<tensorrt_llm::runtime::ITensor> _tensor = std::move(tensor);
-                    layer_to_pool_mapping = tr::Torch::tensor(_tensor);
-                }
-                return layer_to_pool_mapping;
-            },
-            py::call_guard<py::gil_scoped_release>())
-        .def(
-            "get_primary_pool_data",
-            [](tbk::BaseKVCacheManager& self, SizeType32 layer_idx) -> at::Tensor
-            {
-                auto pool = tr::Torch::tensor(self.getPrimaryPool(layer_idx));
-                auto pool_layer_idx = self.getPoolLayerIdx(layer_idx);
-                return pool.index({torch::indexing::Slice(), pool_layer_idx});
-            },
-            py::call_guard<py::gil_scoped_release>())
-        .def(
-            "get_indexer_k_cache_pool_data",
-            [](tbk::BaseKVCacheManager& self, SizeType32 layer_idx) -> at::Tensor
-            {
-                auto pool = tr::Torch::tensor(self.getIndexerKCachePool());
-                return pool.index({torch::indexing::Slice(), layer_idx});
-            },
-            py::call_guard<py::gil_scoped_release>())
-        .def(
-            "get_unique_primary_pool", [](tbk::BaseKVCacheManager& self) { return self.getUniquePrimaryPool(); },
-            py::call_guard<py::gil_scoped_release>())
-        .def(
-            "get_block_offsets_of_batch",
-            [](tbk::BaseKVCacheManager& self, at::Tensor output, SizeType32 firstBatchSlotIdx, SizeType32 batchSize,
-                SizeType32 beamWidth)
-            {
-                auto _output = from_torch(output);
-                TLLM_CHECK_WITH_INFO(_output.has_value(), "Invalid output tensor.");
-                self.getBlockOffsetsOfBatch(*(_output.value()), firstBatchSlotIdx, batchSize, beamWidth);
-            },
-            py::call_guard<py::gil_scoped_release>())
-        .def(
-            "copy_block_offsets",
-            [](tbk::BaseKVCacheManager& self, at::Tensor output, SizeType32 outputSlotOffset,
-                tb::LlmRequest::RequestIdType requestId)
-            {
-                auto _output = from_torch(output);
-                TLLM_CHECK_WITH_INFO(_output.has_value(), "Invalid output tensor.");
-                auto maxBlockCount = self.copyBlockOffsets(*(_output.value()), outputSlotOffset, requestId);
-                return maxBlockCount;
-            },
-            py::call_guard<py::gil_scoped_release>())
-        .def(
-            "copy_batch_block_offsets",
-            [](tbk::BaseKVCacheManager& self, at::Tensor output,
-                std::vector<tb::LlmRequest::RequestIdType> const& requestIds, SizeType32 const beamWidth,
-                SizeType32 const offset)
-            {
-                auto _output = from_torch(output);
-                TLLM_CHECK_WITH_INFO(_output.has_value(), "Invalid output tensor.");
-                for (size_t i = 0; i < requestIds.size(); ++i)
-                {
-                    self.copyBlockOffsets(*(_output.value()), i * beamWidth + offset, requestIds[i]);
+                    adapter->registerKvTensors(std::move(kv_tensors));
+                    return;
                 }
             },
-            py::call_guard<py::gil_scoped_release>())
-        .def(
-            "get_latest_events",
-            [](tbk::BaseKVCacheManager& self, std::optional<double> timeout_ms = std::nullopt)
-            {
-                if (timeout_ms)
-                {
-                    return self.getLatestEvents(std::chrono::milliseconds(static_cast<int64_t>(*timeout_ms)));
-                }
-                return self.getLatestEvents(std::nullopt);
-            },
-            py::arg("timeout_ms") = std::nullopt, py::call_guard<py::gil_scoped_release>())
-        .def_property_readonly("enable_block_reuse", &BaseKVCacheManager::isEnableBlockReuse)
-        .def("rewind_kv_cache", &BaseKVCacheManager::rewindKVCache, py::call_guard<py::gil_scoped_release>())
-        .def_property_readonly("cross_kv", &BaseKVCacheManager::isCrossKv)
-        .def("store_context_blocks", &BaseKVCacheManager::storeContextBlocks, py::call_guard<py::gil_scoped_release>())
-        .def("store_blocks_for_reuse", &BaseKVCacheManager::storeBlocksForReuse,
-            py::call_guard<py::gil_scoped_release>())
-        .def("get_cache_block_ids", &BaseKVCacheManager::getCacheBlockIds, py::call_guard<py::gil_scoped_release>())
-        .def("get_batch_cache_block_ids", &BaseKVCacheManager::getBatchCacheBlockIds,
-            py::call_guard<py::gil_scoped_release>())
-        .def("flush_iteration_events", &BaseKVCacheManager::flushIterationEvents,
-            py::call_guard<py::gil_scoped_release>())
-        .def("get_last_block_id", &BaseKVCacheManager::getLastBlockId, py::call_guard<py::gil_scoped_release>())
-        .def("unpin_blocks_by_id", &BaseKVCacheManager::unpinBlocksById, py::call_guard<py::gil_scoped_release>());
+            py::arg("kv_tensors"), py::call_guard<py::gil_scoped_release>())
+;
 
     py::enum_<tbk::CacheType>(m, "CacheType")
         .value("SELF", tbk::CacheType::kSELF)

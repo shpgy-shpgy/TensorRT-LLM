@@ -35,6 +35,7 @@ if ENABLE_MULTI_DEVICE:
 
 BufferManagerCpp = tensorrt_llm.bindings.internal.runtime.BufferManager
 KVCacheManagerCpp = tensorrt_llm.bindings.internal.batch_manager.KVCacheManager
+# KVCacheAdapterCpp = tensorrt_llm.bindings.internal.batch_manager.KVCacheAdapter
 CacheTypeCpp = tensorrt_llm.bindings.internal.batch_manager.CacheType
 ModelConfigCpp = tensorrt_llm.bindings.ModelConfig
 DataType = tensorrt_llm.bindings.DataType
@@ -366,10 +367,44 @@ class KVCacheManager(BaseResourceManager):
                 kwargs['event_manager'] = KVCacheEventManagerCpp(
                     max_kv_event_entries=self.event_buffer_max_size)
 
-        self.impl = KVCacheManagerCpp(**kwargs)
-
+        #self.impl = KVCacheManagerCpp(**kwargs)
+        import sys
+        sys.path.append('/data/luyufan/workspace/kvcached')
+        # allocate kvcached pools via kvcached.integrations (use dtype & device known here)
+        import kvcached.integration.tensorrt_llm.interfaces as kvcached_ifaces
+        kvcached_ifaces.init_kvcached(tp_rank = mapping.tp_rank,
+                                      tp_size = mapping.tp_size,
+                                      is_worker = True)
+        
+        max_num_kv_heads = max(self.num_kv_heads_per_layer)
+        self.dtype_size = get_size_in_bytes(1,dtype)
+        custom_impl = kvcached_ifaces.get_kv_cache_manager(num_blocks=self.blocks_in_primary_pool,
+                                                         block_size=self.tokens_per_block,
+                                                         cell_size=(max_num_kv_heads * self.head_dim * self.kv_factor) * self.dtype_size,
+                                                         num_layers=self.num_layers,
+                                                         cross_kv = (kv_cache_type == CacheTypeCpp.CROSS)
+                                                         )
+        self.impl = KVCacheManagerCpp.make_kvcached_adapter(custom_impl)
+        # compute kvcache shape expected by alloc_kv_cache: (num_blocks, num_layers, 2, tokens_per_block)
+        kvcache_shape = (self.blocks_in_primary_pool, self.num_layers, 2, self.tokens_per_block)
+        # choose dtype consistent with model (e.g., torch.half)
+        kv_dtype = dtype  # dtype is available in this scope in resource_manager
+        device_str = f"cuda:{torch.cuda.current_device()}"
+        kv_tensors = kvcached_ifaces.alloc_kv_cache(
+            kvcache_shape=kvcache_shape,
+            block_size=self.tokens_per_block,
+            dtype=kv_dtype,
+            device=device_str,
+            num_layers=self.num_layers,
+        )
+        print(f"***********{kv_tensors}")
+        # register returned tensors into kvcached impl
+        self.impl.register_kv_tensors(kv_tensors)
+        # mark pools allocated for TRT path
         self.impl.allocate_pools(False)
         self.kv_cache_pool_pointers = self.impl.get_block_pool_pointers()
+        print(f"***********{self.kv_cache_pool_pointers}")
+
         kv_cache_block_scale_pool_pointers = self.impl.get_block_scale_pool_pointers(
         )
         if kv_cache_block_scale_pool_pointers.numel() > 0:
