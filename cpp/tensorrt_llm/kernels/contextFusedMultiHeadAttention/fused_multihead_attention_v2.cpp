@@ -294,7 +294,7 @@ void FusedMultiHeadAttentionXMMAKernelV2::run(
     } // forceunroll = true for flash attention kernels
     else if (mSM == kSM_90 && launch_params.flash_attention && launch_params.warp_specialization)
     {
-        dim3 block_size;
+        dim3 block_size{1, 1, 1};
 
         if (launch_params.dynamic_scheduler)
         {
@@ -348,6 +348,31 @@ void FusedMultiHeadAttentionXMMAKernelV2::run(
                 block_size.x = m_steps / NUM_COMPUTE_GROUPS;
             }
         }
+        if (block_size.x <= 0) block_size.x = 1;
+        if (block_size.y <= 0) block_size.y = 1;
+        if (block_size.z <= 0) block_size.z = 1;
+
+        // kernelParams[0] 应当指向 params 结构
+        if (kernelParams[0] == nullptr) {
+            TLLM_LOG_ERROR("kernelParams[0] == nullptr (params pointer), abort launch");
+            TLLM_CHECK(false);
+        }
+
+        // 检查 shared mem 是否超过设备限制（query device）
+        int curDevice = 0;
+        cudaGetDevice(&curDevice);
+        int maxSharedPerBlock = 0;
+#if defined(cudaDevAttrMaxSharedMemoryPerBlockOptin)
+        cudaDeviceGetAttribute(&maxSharedPerBlock, cudaDevAttrMaxSharedMemoryPerBlockOptin, curDevice);
+#else
+        cudaDeviceGetAttribute(&maxSharedPerBlock, cudaDevAttrMaxSharedMemoryPerBlock, curDevice);
+#endif
+        if (static_cast<int>(kernelMeta.mSharedMemBytes) > maxSharedPerBlock) {
+            TLLM_LOG_WARNING("Requested sharedMem=%u exceeds device max %d", kernelMeta.mSharedMemBytes, maxSharedPerBlock);
+        }
+        
+        TLLM_LOG_INFO("Launching FMHA kernel grid=(%u,%u,%u) blockDim.x=%u sharedMem=%u",
+                block_size.x, block_size.y, block_size.z, kernelMeta.mThreadsPerCTA, kernelMeta.mSharedMemBytes);
 
         TLLM_CU_CHECK(mDriver->cuLaunchKernel(func, block_size.x, block_size.y, block_size.z, kernelMeta.mThreadsPerCTA,
             1, 1, kernelMeta.mSharedMemBytes, stream, kernelParams, nullptr));

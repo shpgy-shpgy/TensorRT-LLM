@@ -367,7 +367,7 @@ class KVCacheManager(BaseResourceManager):
                 kwargs['event_manager'] = KVCacheEventManagerCpp(
                     max_kv_event_entries=self.event_buffer_max_size)
 
-        #self.impl = KVCacheManagerCpp(**kwargs)
+        # self.impl = KVCacheManagerCpp(**kwargs)
         import sys
         sys.path.append('/data/luyufan/workspace/kvcached')
         # allocate kvcached pools via kvcached.integrations (use dtype & device known here)
@@ -378,42 +378,51 @@ class KVCacheManager(BaseResourceManager):
         
         max_num_kv_heads = max(self.num_kv_heads_per_layer)
         self.dtype_size = get_size_in_bytes(1,dtype)
-        custom_impl = kvcached_ifaces.get_kv_cache_manager(num_blocks=self.blocks_in_primary_pool,
-                                                         block_size=self.tokens_per_block,
-                                                         cell_size=(max_num_kv_heads * self.head_dim * self.kv_factor) * self.dtype_size,
-                                                         num_layers=self.num_layers,
-                                                         cross_kv = (kv_cache_type == CacheTypeCpp.CROSS)
-                                                         )
-        self.impl = KVCacheManagerCpp.make_kvcached_adapter(custom_impl)
+        
         # compute kvcache shape expected by alloc_kv_cache: (num_blocks, num_layers, 2, tokens_per_block)
-        kvcache_shape = (self.blocks_in_primary_pool, self.num_layers, 2, self.tokens_per_block)
+        kvcache_shape = (self.blocks_in_primary_pool, self.num_layers, self.kv_factor, self.tokens_per_block * max_num_kv_heads * self.head_dim)
         # choose dtype consistent with model (e.g., torch.half)
         kv_dtype = dtype  # dtype is available in this scope in resource_manager
+        
         device_str = f"cuda:{torch.cuda.current_device()}"
         kv_tensors = kvcached_ifaces.alloc_kv_cache(
             kvcache_shape=kvcache_shape,
-            block_size=self.tokens_per_block,
+            block_size=self.tokens_per_block * max_num_kv_heads * self.head_dim ,
             dtype=kv_dtype,
             device=device_str,
             num_layers=self.num_layers,
         )
-        print(f"***********{kv_tensors}")
+        
+        custom_impl = kvcached_ifaces.get_kv_cache_manager(
+                        num_blocks=self.blocks_in_primary_pool,
+                        block_size=self.tokens_per_block,
+                        cell_size=self.dtype_size * self.kv_factor * max_num_kv_heads * self.head_dim,
+                        num_layers=self.num_layers,
+                        cross_kv=(kv_cache_type == CacheTypeCpp.CROSS)
+                    )
+        self.impl = KVCacheManagerCpp.make_kvcached_adapter(custom_impl)
         # register returned tensors into kvcached impl
         self.impl.register_kv_tensors(kv_tensors)
+
+        custom_impl.check_gpu_memory()
+        custom_impl.validate_memory_layout()
+
+        print(f"****GPU memory allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"****GPU memory reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+   
         # mark pools allocated for TRT path
         self.impl.allocate_pools(False)
         self.kv_cache_pool_pointers = self.impl.get_block_pool_pointers()
-        print(f"***********{self.kv_cache_pool_pointers}")
+        print(f"***********kv_cache_pool_pointers: {self.kv_cache_pool_pointers}")
 
-        kv_cache_block_scale_pool_pointers = self.impl.get_block_scale_pool_pointers(
-        )
-        if kv_cache_block_scale_pool_pointers.numel() > 0:
+        kv_cache_block_scale_pool_pointers = self.impl.get_block_scale_pool_pointers()
+        if kv_cache_block_scale_pool_pointers is not None and kv_cache_block_scale_pool_pointers.numel() > 0:
             self.kv_cache_pool_pointers = torch.stack([
                 self.kv_cache_pool_pointers, kv_cache_block_scale_pool_pointers
-            ],
-                                                      dim=-1)
+            ], dim=-1)
 
         self.kv_cache_pool_mapping = self.impl.get_layer_to_pool_mapping()
+        print(f"***********kv_cache_pool_mapping: {self.kv_cache_pool_mapping}")
         self.num_pools = self.impl.num_pools
         self.max_blocks_per_seq = self.impl.max_blocks_per_seq
         self.enable_block_reuse = kv_cache_config.enable_block_reuse
