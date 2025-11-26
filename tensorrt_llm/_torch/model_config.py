@@ -306,6 +306,7 @@ class ModelConfig(Generic[TConfig]):
         quant_config = QuantConfig()
         layer_quant_config = None
 
+        print("**********load_hf_quant_config************")
         # DeepSeek V3 FP8 ckpt
         if hf_quant_config.get("quant_method") == "fp8" and hf_quant_config.get(
                 "weight_block_size", []):
@@ -317,6 +318,8 @@ class ModelConfig(Generic[TConfig]):
                 ]
             else:
                 quant_config.exclude_modules = ["*eh_proj"]
+            quant_config.exclude_modules.append("*conv1d*")
+            quant_config.exclude_modules.extend(hf_quant_config.get("modules_to_not_convert", []))
 
             block_size = hf_quant_config.get("weight_block_size", [])
             assert tuple(block_size) == (

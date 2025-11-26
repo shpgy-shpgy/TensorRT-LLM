@@ -112,6 +112,7 @@ def should_skip_quantization(
     excluded_patterns: list[str],
 ) -> bool:
     """Check if a node or parameter name should be skipped based on excluded patterns."""
+    # print("**********should_skip_quantization called**********")
     if isinstance(node_or_name, str):
         modname, _, _ = node_or_name.rpartition(".")
     else:

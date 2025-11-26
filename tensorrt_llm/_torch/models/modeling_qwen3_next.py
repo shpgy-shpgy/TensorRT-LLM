@@ -270,6 +270,7 @@ class Qwen3NextConfig(PretrainedConfig):
         layer_types=None,
         **kwargs,
     ):
+        print("***********Qwen3NextConfig init called**********")
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings

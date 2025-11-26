@@ -134,6 +134,7 @@ def weight_only_quantize_dict(weights: Dict[str, torch.Tensor],
                               ],
                               exclude_modules=None,
                               plugin: bool = True):
+    print("**********weight_only_quantize_dict********")
     if quant_algo not in [QuantAlgo.W4A16, QuantAlgo.W8A16]:
         return weights
     if exclude_modules is None:

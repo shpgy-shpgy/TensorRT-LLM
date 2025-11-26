@@ -481,6 +481,8 @@ class DecoderModelForCausalLM(nn.Module,
         if quant_config:
             kv_cache_quant_algo = quant_config.kv_cache_quant_algo
         new_config = QuantConfig(kv_cache_quant_algo=kv_cache_quant_algo)
+        print("**********apply_quant_config_exclude_modules********")
+        # raise Exception('test exception')
 
         if quant_config is not None:
             if quant_config.exclude_modules is not None:
