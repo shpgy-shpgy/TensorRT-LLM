@@ -327,6 +327,7 @@ class ModelConfig(Generic[TConfig]):
                 ]
             else:
                 quant_config.exclude_modules = ["*eh_proj"]
+            quant_config.exclude_modules.extend(hf_quant_config.get("modules_to_not_convert", []))
 
             block_size = hf_quant_config.get("weight_block_size", [])
             assert tuple(block_size) == (
