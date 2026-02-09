@@ -146,7 +146,9 @@ class GenerationExecutor(ABC):
             disaggregated_params=disaggregated_params,
             multimodal_params=multimodal_params,
             scheduling_params=scheduling_params)
+        print("******* submit request *******", prompt_token_ids[0:2] if prompt_token_ids else "no input")
         result = self.submit(request)
+        print("******* submitted request *******", prompt_token_ids[0:2] if prompt_token_ids else "no input")
         # release memory in time
         if hasattr(request, "multimodal_params"):
             del request.multimodal_params

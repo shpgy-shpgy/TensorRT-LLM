@@ -1,7 +1,7 @@
 import asyncio
 import json
 import weakref
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field  # added for lightweight request proxy
 from queue import Empty, Queue
 from typing import (TYPE_CHECKING, Any, Callable, List, Literal, NamedTuple,
                     Optional, TypeAlias, Union)
@@ -469,6 +469,16 @@ class DetokenizedGenerationResultBase(GenerationResultBase):
 PostprocWorker = DetokenizedGenerationResultBase.PostprocWorker
 
 
+# Lightweight proxy to keep minimal request metadata without holding full request
+@dataclass(slots=True)
+class _MinimalGenerationRequest:
+    id: int
+    sampling_params: SamplingParams
+    prompt_token_ids: List[int]
+    postproc_params: Optional["PostprocParams"] = None
+    streaming: bool = False
+
+
 class GenerationResult(GenerationResultBase):
     '''
     The result of a generation request. It can be used to wait for the completion of the request.
@@ -493,8 +503,16 @@ class GenerationResult(GenerationResultBase):
             background_error_handler,
             postproc_params=generation_request.postproc_params,
         )
-        self._generation_request = generation_request
-        self._streaming = generation_request.streaming
+        # store only minimal metadata to avoid holding large request objects in memory
+        self._generation_request = _MinimalGenerationRequest(
+            id=generation_request.id,
+            sampling_params=generation_request.sampling_params,
+            prompt_token_ids=list(generation_request.prompt_token_ids),
+            postproc_params=(generation_request.postproc_params
+                             if hasattr(generation_request, "postproc_params") else None),
+            streaming=getattr(generation_request, "streaming", False),
+        )
+        self._streaming = self._generation_request.streaming
         self.disaggregated_params = disaggregated_params
         # minimal sampling params needed for logprob calculation
         self._logprob_params = logprob_params
@@ -503,6 +521,19 @@ class GenerationResult(GenerationResultBase):
         self._executor: Optional[weakref.ReferenceType[
             "GenerationExecutor"]] = weakref.ref(executor) if executor else None
         self._aborted = False
+
+        # attempt to free large fields on original request so memory is released promptly
+        try:
+            if hasattr(generation_request, "multimodal_params"):
+                generation_request.multimodal_params = None
+        except Exception:
+            pass
+        try:
+            if hasattr(generation_request, "query_token_ids"):
+                # if it's a tensor or large buffer, remove reference
+                generation_request.query_token_ids = None
+        except Exception:
+            pass
 
     @property
     def request_id(self) -> int:

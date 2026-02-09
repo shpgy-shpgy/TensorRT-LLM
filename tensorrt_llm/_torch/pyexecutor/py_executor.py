@@ -973,6 +973,7 @@ class PyExecutor:
                         self._add_kv_cache_events()
 
                 if self.kv_cache_transceiver and self.ctx_in_transmission_requests:
+                    self._clear_old_timeout_requests()
                     self._terminate_ctx_finished_requests()
 
                 if self.enable_iter_perf_stats:
@@ -984,6 +985,24 @@ class PyExecutor:
                             scheduled_requests=scheduled_batch),
                                    iter_stats=iter_stats,
                                    iter_start_time=iter_start_time))
+                    
+    def _clear_old_timeout_requests(self):
+        prefill_req_ids = [req.py_request_id for req in self.ctx_in_transmission_requests]
+        print("******* prefill ", prefill_req_ids)
+        print("******* kvmanager stats ", self.resource_manager.resource_managers.get(
+            ResourceManagerType.KV_CACHE_MANAGER).get_kv_cache_stats().free_num_blocks)
+        max_prefill_req_id = max(prefill_req_ids) if prefill_req_ids else None
+        error_reqs = []
+        for req in self.ctx_in_transmission_requests:
+            req_id = req.py_request_id
+            if max_prefill_req_id is not None and req_id + 200 <= max_prefill_req_id:
+                print("******* auto terminate prefill req id ", req_id)
+                error_reqs.append(req)
+                # req.state = LlmRequestState.DISAGG_CONTEXT_COMPLETE
+        if len(error_reqs) > 0:
+            self._handle_errors(error_msg="Context transmission timeout", requests=error_reqs)
+            for req in error_reqs:
+                self.ctx_in_transmission_requests.remove(req)
 
     def _prepare_draft_requests(self):
         try:
@@ -1515,6 +1534,8 @@ class PyExecutor:
                 request_id=req_id,
                 error_msg=error_msg,
                 client_id=request.py_client_id)
+            logger.error(f"Request {req_id} failed with error: {error_msg}")
+        logger.error(f'before handling errors, active_requests = {[req.py_request_id for req in self.active_requests]}')
         if requests is None:
             self.active_requests.clear()
         else:
@@ -1522,6 +1543,7 @@ class PyExecutor:
                 request for request in self.active_requests
                 if request not in requests
             ]
+        logger.error(f'after handling errors, active_requests = {[req.py_request_id for req in self.active_requests]}')
         self._enqueue_responses(error_responses.items())
 
     def _terminate_request(self, request: LlmRequest):
@@ -1554,7 +1576,7 @@ class PyExecutor:
         if 0 not in self.dist.mapping.tp_group and not self.gather_all_responses:
             return
 
-        logger.debug(
+        logger.info(
             f'before gather, rank = {self.dist.rank}, responses = {responses}')
         if self.enable_attention_dp and self.dist.world_size != 1:
             if not self.gather_all_responses:
@@ -1568,7 +1590,7 @@ class PyExecutor:
                         if resp is not None:
                             gather_responses.extend(resp)
                     responses = gather_responses
-        logger.debug(
+        logger.info(
             f'after gather, rank = {self.dist.rank}, responses = {responses}')
 
         if self.dist.rank == 0 or self.gather_all_responses:
@@ -1579,6 +1601,7 @@ class PyExecutor:
                     else:
                         self.responses.update({req_id: [resp]})
                 self.response_cv.notify_all()
+        logger.info(f'after enqueue, rank = {self.dist.rank}, responses in queue = {self.responses}')
 
     @nvtx_range("_handle_first_token_response")
     def _handle_first_token_response(self, scheduled_batch):

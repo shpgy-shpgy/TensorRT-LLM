@@ -422,6 +422,7 @@ class BaseLLM:
         if _postproc_params:
             _postproc_params.postproc_args.num_prompt_tokens = len(
                 prompt_token_ids)
+        print("******* before generate_async *******", inputs[0:2] if prompt_token_ids else "no input", "to ", prompt_token_ids[0:2] if prompt_token_ids else "no input")
         result = self._executor.generate_async(
             prompt_token_ids,
             query_token_ids=query_token_ids,
@@ -435,6 +436,7 @@ class BaseLLM:
             multimodal_params=multimodal_params,
             scheduling_params=scheduling_params,
         )
+        print("******* after generate_async *******", inputs[0:2] if prompt_token_ids else "no input", "to ", prompt_token_ids[0:2] if prompt_token_ids else "no input")
 
         return RequestOutput._from_generation_result(result, prompt,
                                                      self.tokenizer)

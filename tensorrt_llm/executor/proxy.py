@@ -168,6 +168,13 @@ class GenerationExecutorProxy(GenerationExecutor):
             client_id = res.client_id
             nonlocal event_loop
             nonlocal async_queues
+            
+            # It is possible the client entry in self._results was removed
+            # (for example when a request timed out and was cleaned up by the
+            # executor). Guard against missing client_id to avoid KeyError.
+            if client_id not in self._results:
+                logger.debug(f"proxy.py: Received result for unknown client_id {client_id}, ignoring")
+                return
 
             queue = self._results[client_id].queue
             if isinstance(queue, _SyncQueue):
